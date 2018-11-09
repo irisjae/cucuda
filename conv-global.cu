@@ -11,23 +11,20 @@
  **********************************************/
 #define GPU_DEBUG
 
-#define SHARED_X_DIM 256
-#define SHARED_Y_DIM 256
+/**
+ *  
+ * PARAMETERS 
+ *  
+ */
+#define IN_Y_DIM 720 // input image height
+#define IN_X_DIM 1280 // input image width
+#define WINDOW_X_DIM 6 // convolution width
+#define WINDOW_Y_DIM 6 // convolution height
+#define WINDOW_X_STRIDE 2 // convolution x stride
+#define WINDOW_Y_STRIDE 2 // convolution y stride
+#define OUT_CHANNEL_NUM 6 // number of filters of convolution
 
-/*
-  Define all constant variavle below with a REASONABLE name
-*/
-
-#define in_y_dim 720
-#define in_x_dim 1280
-#define window_x_dim 6
-#define window_y_dim 6
-#define window_x_stride 2
-#define window_y_stride 2
-#define out_channel_num 6
-
-//do not support stride wider than dim yet
-//TODO: check edge cases
+//TODO: warn on stride wider than dim
 
 /**
  * 
@@ -47,14 +44,13 @@ inline void __cuda_try( cudaError_t code, const char * file, int line, bool abor
  * UTILS
  * 
  */
-#define SHARED_DIM (SHARED_X_DIM * SHARED_Y_DIM)
-#define out_y_dim ((in_y_dim - window_y_dim) / window_y_stride + 1)
-#define out_x_dim ((in_x_dim - window_x_dim) / window_x_stride + 1)
-#define window_size (window_x_dim * window_y_dim)
-#define in_img_size (in_y_dim * in_x_dim)
-#define in_size in_img_size
-#define out_img_size (out_y_dim * out_x_dim)
-#define out_size (out_img_size * out_channel_num)
+#define OUT_Y_DIM ((IN_Y_DIM - WINDOW_Y_DIM) / WINDOW_Y_STRIDE + 1) // output image height
+#define OUT_X_DIM ((IN_X_DIM - WINDOW_X_DIM) / WINDOW_X_STRIDE + 1) // output image width
+#define WINDOW_SIZE (WINDOW_X_DIM * WINDOW_Y_DIM) // total convolution size
+#define IN_IMG_SIZE (IN_Y_DIM * IN_X_DIM) // total input size per image
+#define IN_SIZE IN_IMG_SIZE // total input size
+#define OUT_IMG_SIZE (OUT_Y_DIM * OUT_X_DIM) // total output size per image
+#define OUT_SIZE (OUT_IMG_SIZE * OUT_CHANNEL_NUM) // total output size
 
 
 
@@ -76,23 +72,23 @@ void cuda_convolution_layer1(unsigned char in_layer[], unsigned char out_layer[]
    * allocate device memory on GPU
    *********************************/
 
-  unsigned int size_y = out_channel_num*out_y_dim*out_x_dim;
+  unsigned int size_y = OUT_CHANNEL_NUM*OUT_Y_DIM*OUT_X_DIM;
   unsigned int mem_size_y = sizeof(float) * size_y;
   float *d_y;
 
-  unsigned int size_bias = out_channel_num;
+  unsigned int size_bias = OUT_CHANNEL_NUM;
   unsigned int mem_size_bias = sizeof(float) * size_bias;
   float *d_bias;
 
-  unsigned int size_weight = out_channel_num*window_size;
+  unsigned int size_weight = OUT_CHANNEL_NUM*WINDOW_SIZE;
   unsigned int mem_size_weight = sizeof(float) * size_weight;
   float *d_weight;
 
-  unsigned int size_in_layer = in_y_dim*in_x_dim;
+  unsigned int size_in_layer = IN_Y_DIM*IN_X_DIM;
   unsigned int mem_size_in_layer = sizeof(unsigned char) * size_in_layer;
   unsigned char *d_in_layer;
 
-  unsigned int size_out_layer = out_channel_num*out_y_dim*out_x_dim;
+  unsigned int size_out_layer = OUT_CHANNEL_NUM*OUT_Y_DIM*OUT_X_DIM;
   unsigned int mem_size_out_layer = sizeof(unsigned char) * size_out_layer;
   unsigned char *d_out_layer;
 
@@ -184,12 +180,12 @@ void cuda_convolution_layer1(unsigned char in_layer[], unsigned char out_layer[]
  * init values of feature maps at bias value 
  ********************************************/
 __global__ void layer1_init_bias(float* d_y, float* d_bias) {
-	int total_work_size = out_size;
+	int total_work_size = OUT_SIZE;
 	int total_workers = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
 	int worker_id = ((((((blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * blockDim.z + threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 
 	for (int n = worker_id; n < total_work_size; n += total_workers) {
-		int z = (n / out_img_size);
+		int z = (n / OUT_IMG_SIZE);
 
 		d_y[n] = d_bias[z];
 	}
@@ -201,19 +197,19 @@ __global__ void layer1_init_bias(float* d_y, float* d_bias) {
  * loop over output feature maps
  ********************************************/
 __global__ void layer1_feature_maps(float* d_y, unsigned char* d_in_layer, float* d_weight) {
-	int total_work_size = out_size;
+	int total_work_size = OUT_SIZE;
 	int total_workers = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
 	int worker_id = ((((((blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * blockDim.z + threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 
 	for (int n = worker_id; n < total_work_size; n += total_workers) {
-		int x = (n % out_img_size) % out_x_dim;
-		int y = (n % out_img_size) / out_x_dim;
-		int z = (n / out_img_size);
+		int x = (n % OUT_IMG_SIZE) % OUT_X_DIM;
+		int y = (n % OUT_IMG_SIZE) / OUT_X_DIM;
+		int z = (n / OUT_IMG_SIZE);
 
 		float convolution = 0;
-		for (int i = 0; i < window_x_dim; i ++) {
-			for (int j = 0; j < window_y_dim; j ++) {
-				convolution += d_in_layer[(y * window_y_stride + j) * in_x_dim + (x * window_x_stride + i)] * d_weight[((z) * window_y_dim + j) * window_x_dim + i];
+		for (int i = 0; i < WINDOW_X_DIM; i ++) {
+			for (int j = 0; j < WINDOW_Y_DIM; j ++) {
+				convolution += d_in_layer[(y * WINDOW_Y_STRIDE + j) * IN_X_DIM + (x * WINDOW_X_STRIDE + i)] * d_weight[((z) * WINDOW_Y_DIM + j) * WINDOW_X_DIM + i];
 			}
 		}
 		d_y[n] += convolution;
@@ -226,7 +222,7 @@ __global__ void layer1_feature_maps(float* d_y, unsigned char* d_in_layer, float
  * sigmoid activation function
  ********************************************/
 __global__ void layer1_sigmoid(float* d_y, unsigned char* d_out_layer){
-	int total_work_size = out_size;
+	int total_work_size = OUT_SIZE;
 	int total_workers = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
 	int worker_id = ((((((blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * blockDim.z + threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 

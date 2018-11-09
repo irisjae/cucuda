@@ -11,23 +11,23 @@
  **********************************************/
 #define GPU_DEBUG
 
-#define SHARED_X_DIM 128
-#define SHARED_Y_DIM 128
+/**
+ *  
+ * PARAMETERS 
+ *  
+ */
+#define SHARED_X_DIM 128 // shared memory buffer width
+#define SHARED_Y_DIM 128 // shared memory buffer height
+#define IN_Y_DIM 720 // input image height
+#define IN_X_DIM 1280 // input image width
+#define WINDOW_X_DIM 6 // convolution width
+#define WINDOW_Y_DIM 6 // convolution height
+#define WINDOW_X_STRIDE 2 // convolution x stride
+#define WINDOW_Y_STRIDE 2 // convolution y stride
+#define OUT_CHANNEL_NUM 6 // number of filters of convolution
 
-/*
-  Define all constant variavle below with a REASONABLE name
-*/
-
-#define in_y_dim 720
-#define in_x_dim 1280
-#define window_x_dim 6
-#define window_y_dim 6
-#define window_x_stride 2
-#define window_y_stride 2
-#define out_channel_num 6
-
-//do not support stride wider than dim yet
-//TODO: check edge cases
+//TODO: warn on stride wider than dim 
+//TODO: warn on shared dims minus window dims not divisible by window stride
 
 /**
  * 
@@ -47,14 +47,14 @@ inline void __cuda_try( cudaError_t code, const char * file, int line, bool abor
  * UTILS
  * 
  */
-#define SHARED_DIM (SHARED_X_DIM * SHARED_Y_DIM)
-#define out_y_dim ((in_y_dim - window_y_dim) / window_y_stride + 1)
-#define out_x_dim ((in_x_dim - window_x_dim) / window_x_stride + 1)
-#define window_size (window_x_dim * window_y_dim)
-#define in_img_size (in_y_dim * in_x_dim)
-#define in_size in_img_size
-#define out_img_size (out_y_dim * out_x_dim)
-#define out_size (out_img_size * out_channel_num)
+#define SHARED_SIZE (SHARED_X_DIM * SHARED_Y_DIM) // total shared memory buffer size
+#define OUT_Y_DIM ((IN_Y_DIM - WINDOW_Y_DIM) / WINDOW_Y_STRIDE + 1) // output image height
+#define OUT_X_DIM ((IN_X_DIM - WINDOW_X_DIM) / WINDOW_X_STRIDE + 1) // output image width
+#define WINDOW_SIZE (WINDOW_X_DIM * WINDOW_Y_DIM) // total convolution size
+#define IN_IMG_SIZE (IN_Y_DIM * IN_X_DIM) // total input size per image
+#define IN_SIZE IN_IMG_SIZE // total input size
+#define OUT_IMG_SIZE (OUT_Y_DIM * OUT_X_DIM) // total output size per image
+#define OUT_SIZE (OUT_IMG_SIZE * OUT_CHANNEL_NUM) // total output size
 
 #define split( n, among ) ((n + (among - 1)) / among)
 
@@ -78,23 +78,23 @@ void cuda_convolution_layer1(unsigned char in_layer[], unsigned char out_layer[]
    * allocate device memory on GPU
    *********************************/
 
-  unsigned int size_y = out_channel_num*out_y_dim*out_x_dim;
+  unsigned int size_y = OUT_CHANNEL_NUM*OUT_Y_DIM*OUT_X_DIM;
   unsigned int mem_size_y = sizeof(float) * size_y;
   float *d_y;
 
-  unsigned int size_bias = out_channel_num;
+  unsigned int size_bias = OUT_CHANNEL_NUM;
   unsigned int mem_size_bias = sizeof(float) * size_bias;
   float *d_bias;
 
-  unsigned int size_weight = out_channel_num*window_size;
+  unsigned int size_weight = OUT_CHANNEL_NUM*WINDOW_SIZE;
   unsigned int mem_size_weight = sizeof(float) * size_weight;
   float *d_weight;
 
-  unsigned int size_in_layer = in_y_dim*in_x_dim;
+  unsigned int size_in_layer = IN_Y_DIM*IN_X_DIM;
   unsigned int mem_size_in_layer = sizeof(unsigned char) * size_in_layer;
   unsigned char *d_in_layer;
 
-  unsigned int size_out_layer = out_channel_num*out_y_dim*out_x_dim;
+  unsigned int size_out_layer = OUT_CHANNEL_NUM*OUT_Y_DIM*OUT_X_DIM;
   unsigned int mem_size_out_layer = sizeof(unsigned char) * size_out_layer;
   unsigned char *d_out_layer;
 
@@ -195,128 +195,102 @@ void cuda_convolution_layer1(unsigned char in_layer[], unsigned char out_layer[]
  * Layer 1, Step 1: 
  * init values of feature maps at bias value 
  ********************************************/
-/*__global__ void layer1_init_bias(float* d_y, float* d_bias) {
-	int total_image_dim = (out_y_dim * out_x_dim);
-	int total_work = (out_y_dim * out_x_dim * out_channel_num);
-
-	int blocks_per_grid = gridDim.z * gridDim.y * gridDim.x;
-	int work_per_block = split(total_work, blocks_per_grid);
-
-	int block_id = blockIdx.z * gridDim.y * gridDim.x + blockIdx.y * gridDim.x + blockIdx.x;
-	int min_work_of_block = work_per_block * block_id;
-	int max_work_of_block = min_work_of_block + work_per_block - 1;
-	if (max_work_of_block > total_work - 1) max_work_of_block = total_work - 1;
-
-	int min_z_of_block = min_work_of_block / total_image_dim;
-	int max_z_of_block = max_work_of_block / total_image_dim;
-
-	int threads_per_block = blockDim.z * blockDim.y * blockDim.x;
-	int work_per_thread = split(work_per_block, threads_per_block);
-
-	int thread_id = threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x;
-	int min_work_of_thread = min_work_of_block +  work_per_thread * thread_id;
-	int max_work_of_thread = min_work_of_thread + work_per_thread - 1;
-	if (max_work_of_thread - min_work_of_thread > work_per_thread - 1) max_work_of_thread = work_per_thread - 1;
-
-	__shared__ float bias;
-
-	for (int z = min_z_of_block; z <= max_z_of_block; z ++) {
-		if (thread_id == 0) {
-			bias = d_bias [z];
-		}
-
-		__syncthreads();
-
-		for (int work = min_work_of_thread; work <= max_work_of_thread; work ++) {
-			d_y[work] = bias;
-		}
-	}
-}/*/
 __global__ void layer1_init_bias(float* d_y, float* d_bias) {
-	int total_work_size = out_size;
+	__shared__ float bias_buffer[OUT_CHANNEL_NUM];
+
+	int w_total_work_size = OUT_CHANNEL_NUM;
+	int w_total_workers = (blockDim.x * blockDim.y * blockDim.z);
+	int w_worker_id = (((threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
+
+	for (int w_n = w_worker_id; w_n < w_total_work_size; w_n += w_total_workers) {
+		bias_buffer[w_n] = d_bias[w_n];
+	}
+
+	__syncthreads();
+
+	int total_work_size = OUT_SIZE;
 	int total_workers = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
 	int worker_id = ((((((blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * blockDim.z + threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 
 	for (int n = worker_id; n < total_work_size; n += total_workers) {
-		int z = (n / out_img_size);
+		int z = (n / OUT_IMG_SIZE);
 
-		d_y[n] = d_bias[z];
+		d_y[n] = bias_buffer[z];
 	}
-}//*/
+}
 
 /*********************************************
  * GPU kernel
  * Layer 1, Step 2: 
  * loop over output feature maps
  ********************************************/
+#define TILE_X_dim ((SHARED_X_DIM - WINDOW_X_DIM) / WINDOW_X_STRIDE + 1)
+#define TILE_Y_dim ((SHARED_Y_DIM - WINDOW_Y_DIM) / WINDOW_Y_STRIDE + 1)
+#define X_TILES split(OUT_X_DIM, TILE_X_dim)
+#define Y_TILES split(OUT_Y_DIM, TILE_Y_dim)
 __global__ void layer1_feature_maps(float* d_y, unsigned char* d_in_layer, float* d_weight) {
-	__shared__ unsigned char in_buffer[SHARED_DIM];
+	__shared__ unsigned char in_buffer[SHARED_SIZE];
+	__shared__ float weight_buffer[WINDOW_SIZE * OUT_CHANNEL_NUM];
 
-	int z_per_layer = split(out_channel_num, gridDim.z);
-	int min_z_of_block = blockIdx.z * z_per_layer;
-	int max_z_of_block = min_z_of_block + (z_per_layer - 1);
-	if (max_z_of_block >= out_channel_num) max_z_of_block = out_channel_num - 1;
+	int w_total_work_size = WINDOW_SIZE * OUT_CHANNEL_NUM;
+	int w_total_workers = (blockDim.x * blockDim.y * blockDim.z);
+	int w_worker_id = (((threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 
-	int out_x_per_block = split(out_x_dim, gridDim.x);
-	int out_y_per_block = split(out_y_dim, gridDim.y);
+	for (int w_n = w_worker_id; w_n < w_total_work_size; w_n += w_total_workers) {
+		weight_buffer[w_n] = d_weight[w_n];
+	}
 
-	int min_x_of_block = blockIdx.x * out_x_per_block;
-	int max_x_of_block = min_x_of_block + (out_x_per_block - 1);
-	if (max_x_of_block >= out_x_dim) max_x_of_block = out_x_dim - 1;
+	int total_work_size = X_TILES * Y_TILES * OUT_CHANNEL_NUM;
+	int total_workers = (gridDim.x * gridDim.y * gridDim.z);
+	int worker_id = (((blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x);
 
-	int min_y_of_block = blockIdx.y * out_y_per_block;
-	int max_y_of_block = min_y_of_block + (out_y_per_block - 1);
-	if (max_y_of_block >= out_y_dim) max_y_of_block = out_y_dim - 1;
+	for (int n = worker_id; n < total_work_size; n += total_workers) {
+		int z = (n / (X_TILES * Y_TILES));
+		int tile_x = (n % (X_TILES * Y_TILES)) % (X_TILES);
+		int tile_y = (n % (X_TILES * Y_TILES)) / (X_TILES);
 
-	int in_x_per_buffer = SHARED_X_DIM;
-	int in_y_per_buffer = SHARED_Y_DIM;
+		int s_x_offset = tile_x * TILE_X_dim * WINDOW_X_STRIDE;
+		int s_y_offset = tile_y * TILE_Y_dim * WINDOW_Y_STRIDE;
 
-	int out_x_per_buffer = (in_x_per_buffer - window_x_dim) / window_x_stride + 1;
-	int out_y_per_buffer = (in_y_per_buffer - window_y_dim) / window_y_stride + 1;
+		int s_total_work_size = SHARED_X_DIM * SHARED_Y_DIM;;
+		int s_total_workers = (blockDim.x * blockDim.y * blockDim.z);
+		int s_worker_id = (((threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 
-	int thread_id = threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x;
-	int threads_per_block = blockDim.z * blockDim.y * blockDim.x;
-
-	for (int z = min_z_of_block; z <= max_z_of_block; z ++ ) {
-		for (int n = 0; n < out_x_per_block * out_y_per_block; n += out_x_per_buffer * out_y_per_buffer) {
-			int buffer_out_x_offset = min_x_of_block + (n % (out_x_per_buffer * split(out_x_per_block, out_x_per_buffer)));
-			int buffer_out_y_offset = min_y_of_block + (n / (out_x_per_buffer * split(out_x_per_block, out_x_per_buffer)));
-
-			int buffer_in_x_offset = buffer_out_x_offset * window_x_stride;
-			int buffer_in_y_offset = buffer_out_y_offset * window_y_stride;
-
-			{
-				int uv_per_thread = split(in_x_per_buffer * in_y_per_buffer, threads_per_block);
-				int uv_thread_offset = thread_id * uv_per_thread;
-				for (int uv = 0; uv < uv_per_thread && (uv_thread_offset + uv) < in_x_per_buffer * in_y_per_buffer; uv ++) {
-					int u = uv % in_x_per_buffer;
-					int v = uv / in_x_per_buffer;
-					in_buffer[v * in_y_per_buffer + u] = d_in_layer[z * in_img_size + (v + buffer_in_y_offset) * in_x_dim + (u + buffer_in_x_offset)];
-				}
+		for (int s_n = s_worker_id; s_n < s_total_work_size; s_n += s_total_workers) {
+			int dx = (s_n % SHARED_X_DIM);
+			int dy = (s_n / SHARED_X_DIM);
+			if ((dy + s_y_offset) < IN_Y_DIM && (dx + s_x_offset) < IN_X_DIM) {
+				in_buffer[(dy) * SHARED_X_DIM + dx] = d_in_layer[(dy + s_y_offset) * IN_X_DIM + (dx + s_x_offset)];
 			}
+		}
 
-			__syncthreads();
+		__syncthreads();
 
-			{
-				int uv_per_thread = split(out_x_per_buffer * out_y_per_buffer, threads_per_block);
-				int uv_thread_offset = thread_id * uv_per_thread;
-				for (int uv = 0; uv < uv_per_thread && (uv_thread_offset + uv) < out_x_per_buffer * out_y_per_buffer; uv ++) {
-					int u = uv % out_x_per_buffer;
-					int v = uv / out_x_per_buffer;
+		int t_x_offset = tile_x * TILE_X_dim;
+		int t_y_offset = tile_y * TILE_Y_dim;
 
-					float convolution = 0;
-					for (int m = 0; m < window_x_dim; m ++) {
-						for (int n = 0; n < window_y_dim; n ++) {
-							convolution += in_buffer[(v * window_y_stride + n) * in_x_per_buffer + (u * window_x_stride + m)] * d_weight[z * window_size + n * window_x_dim + m];
-						}
+		int t_total_work_size = TILE_X_dim * TILE_Y_dim;;
+		int t_total_workers = (blockDim.x * blockDim.y * blockDim.z);
+		int t_worker_id = (((threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
+
+		for (int t_n = t_worker_id; t_n < t_total_work_size; t_n += t_total_workers) {
+			int dx = (t_n % TILE_X_dim);
+			int dy = (t_n / TILE_X_dim);
+			if ((dy + t_y_offset) < OUT_Y_DIM && (dx + t_x_offset) < OUT_X_DIM) {
+				float convolution = 0;
+				for (int i = 0; i < WINDOW_X_DIM; i ++) {
+					for (int j = 0; j < WINDOW_Y_DIM; j ++) {
+						convolution +=
+							weight_buffer[((z) * WINDOW_Y_DIM + j) * WINDOW_X_DIM + i]
+							* in_buffer[(WINDOW_Y_STRIDE * dy + j) * SHARED_X_DIM + (WINDOW_X_STRIDE * dx + i)];
 					}
-					//printf("convolution at (%d, %d): %.6f\n", (buffer_out_x_offset + u), (buffer_out_y_offset + v), convolution);
-					d_y[(buffer_out_y_offset + v) * out_x_dim + (buffer_out_x_offset + u)] += convolution;
 				}
+				d_y[(z * OUT_Y_DIM + (t_y_offset + dy)) * OUT_X_DIM + (t_x_offset + dx)] += convolution;
 			}
 		}
 	}
 }
+
 
 /*********************************************
  * GPU kernel
@@ -324,7 +298,7 @@ __global__ void layer1_feature_maps(float* d_y, unsigned char* d_in_layer, float
  * sigmoid activation function
  ********************************************/
 __global__ void layer1_sigmoid(float* d_y, unsigned char* d_out_layer){
-	int total_work_size = out_size;
+	int total_work_size = OUT_SIZE;
 	int total_workers = (gridDim.x * gridDim.y * gridDim.z) * (blockDim.x * blockDim.y * blockDim.z);
 	int worker_id = ((((((blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * blockDim.z + threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x);
 

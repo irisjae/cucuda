@@ -392,7 +392,7 @@ int main(void) {
 	/* The GPU and CPU results may differ slightly, thus keep a margin. */
 	if(fabs( net_layer1[i*358*638+j*638+k] - cuda_net_layer1[i*358*638+j*638+k]) > 1.1 ){
 	  error_cnt++;
-	  //printf("CPU says %d, GPU says %d at %d, %d, filter %d\n", net_layer1[i*358*638+j*638+k], cuda_net_layer1[i*358*638+j*638+k], j, k, i);
+	  printf("CPU says %d, GPU says %d at %d, %d, filter %d\n", net_layer1[i*358*638+j*638+k], cuda_net_layer1[i*358*638+j*638+k], j, k, i);
 	}
       }
     }
